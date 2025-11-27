@@ -1,17 +1,20 @@
 package main
 
 import (
+	"context"
 	"dns-server/internal/logger"
 	"dns-server/internal/server"
 	"flag"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 var (
 	start                  bool
 	err                    error
 	localAddr, upstreamDns string
-	port                   string = ":53"
 )
 
 func init() {
@@ -23,13 +26,35 @@ func init() {
 func main() {
 	flag.Parse()
 
+	var (
+		ctx     context.Context
+		cancel  context.CancelFunc
+		sigChan chan os.Signal = make(chan os.Signal, 1)
+	)
+
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGKILL)
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	if err = logger.Init(logger.DefaultPath); err != nil {
+		cancel()
+		panic("Failed to initialize logger: " + err.Error())
+	}
+
+	go func() {
+		var sig os.Signal = <-sigChan
+		logger.Info("Closing DNS Server, received signal: " + sig.String())
+		cancel()
+	}()
+
 	if start {
-		var server *server.DNSServer = server.NewDNSServer(localAddr+port, upstreamDns+port)
-		if err = server.Start(); err != nil {
-			log.Println("Erro: ", err.Error())
-			_ = logger.Init(logger.DefaultPath)
+		var server *server.DNSServer = server.NewDNSServer(localAddr, upstreamDns)
+		if err = server.Start(ctx); err != nil {
 			logger.Error("Server gave an error: " + err.Error())
 			panic("DNS Error")
 		}
 	}
+
+	logger.Info("Server Shutdown Complete and Successfully")
 }

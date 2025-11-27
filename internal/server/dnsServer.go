@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"dns-server/internal/cache"
 	"dns-server/internal/logger"
 	"encoding/binary"
@@ -22,10 +23,11 @@ func NewDNSServer(localAddr, upstreamDNS string) *DNSServer {
 		panic("Log couldn't be initialized")
 	}
 
+	var dnsPort string = ":53"
 	return &DNSServer{
 		cache:       cache.NewDNSCache(),
-		upstreamDNS: upstreamDNS,
-		localAddr:   localAddr,
+		upstreamDNS: upstreamDNS + dnsPort,
+		localAddr:   localAddr + dnsPort,
 	}
 }
 
@@ -149,7 +151,13 @@ func createCacheKey(query []byte) string {
 	return fmt.Sprintf("%s:%d", domain, qtype)
 }
 
-func (s *DNSServer) handleQuery(query []byte, clientAddr *net.UDPAddr, conn *net.UDPConn) {
+func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *net.UDPAddr, conn *net.UDPConn) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
 	var (
 		cacheKey string = createCacheKey(query)
 	)
@@ -165,7 +173,7 @@ func (s *DNSServer) handleQuery(query []byte, clientAddr *net.UDPAddr, conn *net
 		return
 	}
 
-	logger.Warn(fmt.Sprintf("Cache miss: %s - Querying upstream dns"))
+	logger.Warn(fmt.Sprintf("Cache miss: %s - Querying upstream dns", cacheKey))
 	var (
 		upstreamConn net.Conn
 		n            int
@@ -201,7 +209,7 @@ func (s *DNSServer) handleQuery(query []byte, clientAddr *net.UDPAddr, conn *net
 	conn.WriteToUDP(response, clientAddr)
 }
 
-func (s *DNSServer) Start() error {
+func (s *DNSServer) Start(ctx context.Context) error {
 	var (
 		err      error
 		errorMsg string
@@ -226,32 +234,69 @@ func (s *DNSServer) Start() error {
 	logger.Info(fmt.Sprintf("DNS server is Listening on: %s", s.localAddr))
 	logger.Info(fmt.Sprintf("DNS server upstream dns: %s", s.upstreamDNS))
 
+	go s.cacheCleanUp(ctx)
+
 	go func() {
-		var ticker *time.Ticker = time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			s.cache.Clean()
-		}
+		<-ctx.Done()
+		logger.Info("Context cancelled, closing UDP connection")
+		conn.Close()
 	}()
 
 	var buffer []byte = make([]byte, 512)
 	for {
-		var (
-			n          int
-			clientAddr *net.UDPAddr
-		)
-		n, clientAddr, err = conn.ReadFromUDP(buffer)
-		if err != nil {
-			errorMsg = fmt.Sprintf("Error reading: %s", err.Error())
-			logger.Error(errorMsg)
-			continue
+		select {
+		case <-ctx.Done():
+			logger.Info("Server Stopping")
+		default:
+			var (
+				n          int
+				clientAddr *net.UDPAddr
+			)
+			conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+
+			n, clientAddr, err = conn.ReadFromUDP(buffer)
+			if err != nil {
+				var (
+					netErr net.Error
+					ok     bool
+				)
+				if netErr, ok = err.(net.Error); ok && netErr.TimeOut() {
+					continue
+				}
+
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					errorMsg = fmt.Sprintf("Error reading: %s", err.Error())
+					logger.Error(errorMsg)
+					continue
+				}
+			}
+
+			var query []byte = make([]byte, n)
+			copy(query, buffer[:n])
+
+			go s.handleQuery(ctx, query, clientAddr, conn)
 		}
-
-		var query []byte = make([]byte, n)
-		copy(query, buffer[:n])
-
-		go s.handleQuery(query, clientAddr, conn)
 	}
 
 	return nil
+}
+
+func (s *DNSServer) cacheCleanUp(ctx context.Context) {
+	var ticker *time.Ticker = time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	logger.Info("Cache Cleanup Started")
+
+	for {
+		select {
+		case <-ticker.C:
+			s.cache.Clean()
+		case <-ctx.Done():
+			logger.Info("Cache Cleanup Stopped")
+			return
+		}
+	}
 }
