@@ -13,11 +13,13 @@ type CacheEntry struct {
 type DNSCache struct {
 	mu      sync.RWMutex
 	entries map[string]*CacheEntry
+	maxSize int
 }
 
 func NewDNSCache() *DNSCache {
 	return &DNSCache{
 		entries: make(map[string]*CacheEntry, 1024),
+		maxSize: 1024,
 	}
 }
 
@@ -35,6 +37,7 @@ func (c *DNSCache) Get(key string) ([]byte, bool) {
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
+		delete(c.entries, key)
 		return nil, false
 	}
 
@@ -44,6 +47,10 @@ func (c *DNSCache) Get(key string) ([]byte, bool) {
 func (c *DNSCache) Set(key string, response []byte, ttl uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if len(c.entries) >= c.maxSize {
+		c.evictOne()
+	}
 
 	c.entries[key] = &CacheEntry{
 		Response:  response,
@@ -59,6 +66,17 @@ func (c *DNSCache) Clean() {
 	for key, entry := range c.entries {
 		if now.After(entry.ExpiresAt) {
 			delete(c.entries, key)
+		}
+	}
+}
+
+func (c *DNSCache) evictOne() {
+	var now time.Time = time.Now()
+
+	for k, v := range c.entries {
+		if now.After(v.ExpiresAt) {
+			delete(c.entries, k)
+			return
 		}
 	}
 }
