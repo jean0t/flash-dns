@@ -24,7 +24,7 @@ func main() {
 	flag.Parse()
 
 	if start {
-		var server *server.DNSServer = server.NewDNSServer(localAddr+port, upstreamDns)
+		var server *server.DNSServer = server.NewDNSServer(localAddr+port, upstreamDns+port)
 		if err = server.Start(); err != nil {
 			log.Println("Erro: ", err.Error())
 			_ = logger.Init(logger.DefaultPath)
