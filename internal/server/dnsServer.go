@@ -260,7 +260,7 @@ func (s *DNSServer) Start(ctx context.Context) error {
 					netErr net.Error
 					ok     bool
 				)
-				if netErr, ok = err.(net.Error); ok && netErr.TimeOut() {
+				if netErr, ok = err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
 
