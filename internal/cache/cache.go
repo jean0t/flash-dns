@@ -37,7 +37,9 @@ func (c *DNSCache) Get(key string) ([]byte, bool) {
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
+		c.mu.Lock()
 		delete(c.entries, key)
+		c.mu.Unlock()
 		return nil, false
 	}
 
@@ -49,7 +51,10 @@ func (c *DNSCache) Set(key string, response []byte, ttl uint32) {
 	defer c.mu.Unlock()
 
 	if len(c.entries) >= c.maxSize {
-		c.evictOne()
+		var exists bool
+		if _, exists = c.entries[key]; !exists {
+			c.evictOne()
+		}
 	}
 
 	c.entries[key] = &CacheEntry{
