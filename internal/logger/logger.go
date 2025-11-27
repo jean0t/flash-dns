@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	logger *log.logger
+	logger *log.Logger
 )
 
 const (
@@ -22,7 +22,7 @@ func Init(logFile string) error {
 		err error
 		f   *os.File
 	)
-	f, err = os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_APPEND)
+	f, err = os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}

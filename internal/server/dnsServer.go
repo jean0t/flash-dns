@@ -5,7 +5,9 @@ import (
 	"dns-server/internal/logger"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -58,7 +60,7 @@ func parseDomainName(data []byte, offset int) (string, int) {
 		position += length // goes to the next length byte
 	}
 
-	return builder.String(), pos
+	return builder.String(), position
 }
 
 func extractTTL(response []byte) uint32 {
@@ -76,7 +78,7 @@ func extractTTL(response []byte) uint32 {
 	for i := 0; i < int(qdcount); i++ {
 
 		//skip domain name
-		for pos < len(response) && response[position] != 0 {
+		for position < len(response) && response[position] != 0 {
 			if response[position] >= 192 { //compression pointer
 				position += 2
 				break
@@ -201,10 +203,10 @@ func (s *DNSServer) handleQuery(query []byte, clientAddr *net.UDPAddr, conn *net
 
 func (s *DNSServer) Start() error {
 	var (
-		err    error
-		errMsg string
-		addr   *net.UDPAddr
-		conn   *net.UDPConn
+		err      error
+		errorMsg string
+		addr     *net.UDPAddr
+		conn     *net.UDPConn
 	)
 	addr, err = net.ResolveUDPAddr("udp", s.localAddr)
 	if err != nil {
@@ -251,4 +253,5 @@ func (s *DNSServer) Start() error {
 		go s.handleQuery(query, clientAddr, conn)
 	}
 
+	return nil
 }

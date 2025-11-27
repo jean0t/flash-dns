@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"log"
 	"sync"
 	"time"
 )
