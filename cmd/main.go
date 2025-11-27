@@ -5,6 +5,7 @@ import (
 	"dns-server/internal/logger"
 	"dns-server/internal/server"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,6 +25,10 @@ func init() {
 
 func main() {
 	flag.Parse()
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "Script must be run a root")
+		os.Exit(1)
+	}
 
 	var (
 		ctx     context.Context
@@ -38,7 +43,8 @@ func main() {
 
 	if err = logger.Init(logger.DefaultPath); err != nil {
 		cancel()
-		panic("Failed to initialize logger: " + err.Error())
+		fmt.Fprintln(os.Stderr, "Failed to initialize logger: "+err.Error())
+		os.Exit(1)
 	}
 
 	go func() {
@@ -51,7 +57,8 @@ func main() {
 		var server *server.DNSServer = server.NewDNSServer(localAddr, upstreamDns)
 		if err = server.Start(ctx); err != nil {
 			logger.Error("Server gave an error: " + err.Error())
-			panic("DNS Error")
+			fmt.Fprintln(os.Stderr, "Server had an error while starting, is port 53 free?")
+			os.Exit(1)
 		}
 	}
 
