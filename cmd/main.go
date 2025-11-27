@@ -5,7 +5,6 @@ import (
 	"dns-server/internal/logger"
 	"dns-server/internal/server"
 	"flag"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
