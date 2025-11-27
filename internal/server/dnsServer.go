@@ -157,7 +157,7 @@ func (s *DNSServer) handleQuery(query []byte, clientAddr *net.UDPAddr, conn *net
 	if cachedResponse, found := s.cache.Get(cacheKey); found {
 		logger.Info(fmt.Sprintf("Cache Hit: %s", cacheKey))
 
-		var response []byte = make([]byte, 0, len(cachedResponse))
+		var response []byte = make([]byte, len(cachedResponse))
 		copy(response, cachedResponse)
 		copy(response[0:2], query[0:2])
 
@@ -171,7 +171,7 @@ func (s *DNSServer) handleQuery(query []byte, clientAddr *net.UDPAddr, conn *net
 		n            int
 		ttl          uint32
 		err          error
-		response     []byte = make([]byte, 0, 512)
+		response     []byte = make([]byte, 512)
 	)
 	upstreamConn, err = net.Dial("udp", s.upstreamDNS)
 	if err != nil {
@@ -234,7 +234,7 @@ func (s *DNSServer) Start() error {
 		}
 	}()
 
-	var buffer []byte = make([]byte, 0, 512)
+	var buffer []byte = make([]byte, 512)
 	for {
 		var (
 			n          int
@@ -247,7 +247,7 @@ func (s *DNSServer) Start() error {
 			continue
 		}
 
-		var query []byte = make([]byte, 0, n)
+		var query []byte = make([]byte, n)
 		copy(query, buffer[:n])
 
 		go s.handleQuery(query, clientAddr, conn)
