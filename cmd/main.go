@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	start                  bool
-	err                    error
-	localAddr, upstreamDns string
+	start       bool
+	err         error
+	localAddr   string
+	upstreamDns string
 )
 
 func init() {
