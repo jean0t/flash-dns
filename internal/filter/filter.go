@@ -2,8 +2,8 @@ package filter
 
 import (
 	"bufio"
-	"flash-dns/internal/logger"
 	"encoding/binary"
+	"flash-dns/internal/logger"
 	"fmt"
 	"os"
 	"regexp"
@@ -49,7 +49,7 @@ func (f *FilterList) IsBlocked(domain string) bool {
 			break
 		}
 
-		domain = strings.Clone(domain[dotIndex:])
+		domain = strings.Clone(domain[dotIndex+1:])
 	}
 
 	return false
