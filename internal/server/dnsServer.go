@@ -39,6 +39,38 @@ func NewDNSServer(localAddr, upstreamDNS string, filterList *filter.FilterList) 
 	}
 }
 
+func (s *DNSServer) dialUpstremDns(query []byte) []byte {
+	var (
+		upstreamConn net.Conn
+		n            int
+		ttl          uint32
+		err          error
+		response     []byte = make([]byte, 512)
+	)
+	upstreamConn, err = net.Dial("udp", s.upstreamDNS)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error connecting to upstream: %s", s.upstreamDNS))
+		return
+	}
+	defer upstreamConn.Close()
+	upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	_, err = upstreamConn.Write(query)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error writing to upstream: %s", err.Error()))
+		return
+	}
+
+	n, err = upstreamConn.Read(response)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error reading from upstream: %s", err.Error()))
+		response = nil
+		return
+	}
+	copy(response, response[:n])
+	return response
+}
+
 func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *net.UDPAddr, conn *net.UDPConn) {
 	select {
 	case <-ctx.Done():
@@ -88,33 +120,10 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 
 	logger.Warn(fmt.Sprintf("Cache miss: %s - Querying upstream dns", cacheKey))
 	var (
-		upstreamConn net.Conn
-		n            int
-		ttl          uint32
-		err          error
-		response     []byte = make([]byte, 512)
+		ttl      uint32
+		response []byte = make([]byte, 512)
 	)
-	upstreamConn, err = net.Dial("udp", s.upstreamDNS)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error connecting to upstream: %s", s.upstreamDNS))
-		return
-	}
-	defer upstreamConn.Close()
-	upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	_, err = upstreamConn.Write(query)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error writing to upstream: %s", err.Error()))
-		return
-	}
-
-	n, err = upstreamConn.Read(response)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error reading from upstream: %s", err.Error()))
-		response = nil
-		return
-	}
-	copy(response, response[:n])
+	response = s.dialUpstremDns(query)
 	ttl = utils.ExtractTTL(response)
 	s.cache.Set(cacheKey, response, ttl)
 	logger.Info(fmt.Sprintf("Cached %s with TTL: %d seconds", cacheKey, ttl))
