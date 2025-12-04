@@ -2,8 +2,8 @@ package filter
 
 import (
 	"bufio"
+	"dns-server/internal/logger"
 	"encoding/binary"
-	"flash-dns/internal/logger"
 	"fmt"
 	"os"
 	"strings"
@@ -16,15 +16,16 @@ type FilterList struct {
 }
 
 func NewFilterList() *FilterList {
-	return &FilterList{domains: make(map[string]bool, 1024)}
+	var defaultSize int = 8192 // 2^13 = 8192
+	return &FilterList{mu: &sync.RWMutex{}, domains: make(map[string]bool, defaultSize)}
 }
 
 func (f *FilterList) Add(domain string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
 	domain = strings.ToLower(strings.TrimSpace(domain))
-	b.domains[domain] = true
+	f.domains[domain] = true
 }
 
 // match wildcard, if googleads.com is blocked, ads.googleads.com is also blocked
@@ -106,7 +107,7 @@ func (f *FilterList) LoadFromFile(filename string) error {
 func (f *FilterList) Count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.domain)
+	return len(f.domains)
 }
 
 func CreateBlockedResponse(query []byte) []byte {
