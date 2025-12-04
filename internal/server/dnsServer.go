@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"dns-server/internal/cache"
-	"dns-server/internal/filter"
-	"dns-server/internal/logger"
-	"dns-server/internal/utils"
+	"flash-dns/internal/cache"
+	"flash-dns/internal/filter"
+	"flash-dns/internal/logger"
+	"flash-dns/internal/utils"
 	"fmt"
 	"net"
 	"os"

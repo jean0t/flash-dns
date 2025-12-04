@@ -2,7 +2,7 @@ package filter
 
 import (
 	"bufio"
-	"dns-server/internal/logger"
+	"flash-dns/internal/logger"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -37,7 +37,7 @@ func (f *FilterList) IsBlocked(domain string) bool {
 		found    bool
 		dotIndex int
 	)
-	domain = strings.ToLower(strings.TrimSpace(string.TrimSuffix(domain, ".")))
+	domain = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(domain, ".")))
 
 	for {
 		if _, found = f.domains[domain]; found {
@@ -49,7 +49,7 @@ func (f *FilterList) IsBlocked(domain string) bool {
 			break
 		}
 
-		domain = strings.Clone(domain[i:])
+		domain = strings.Clone(domain[dotIndex:])
 	}
 
 	return false
@@ -84,7 +84,7 @@ func (f *FilterList) LoadFromFile(filename string) error {
 	for scanner.Scan() {
 		line = strings.TrimSpace(scanner.Text())
 
-		if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") || strings.HasPreffix(line, "@@") {
+		if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") || strings.HasPrefix(line, "@@") {
 			continue
 		}
 

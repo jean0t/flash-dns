@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"dns-server/internal/utils"
+	"flash-dns/internal/utils"
 	"encoding/binary"
 	"net"
 	"testing"
