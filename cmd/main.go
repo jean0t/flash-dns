@@ -2,25 +2,30 @@ package main
 
 import (
 	"context"
+	"dns-server/internal/filter"
 	"dns-server/internal/logger"
 	"dns-server/internal/server"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 )
 
 var (
-	start       bool
-	err         error
-	localAddr   string
-	upstreamDns string
+	start            bool
+	err              error
+	localAddr        string
+	upstreamDns      string
+	filterDomainFile string
+	filterList       *filter.FilterList
 )
 
 func init() {
 	flag.BoolVar(&start, "s", false, "Start the Server")
 	flag.StringVar(&localAddr, "a", "0.0.0.0", "Address that the DNS server will listen")
 	flag.StringVar(&upstreamDns, "d", "1.1.1.1", "Upstream DNS to consult ips")
+	flag.StringVar(&filterDomainFile, "f", "", "Path to file with domains to be filtered")
 }
 
 func verifications() {
@@ -33,6 +38,24 @@ func verifications() {
 		fmt.Fprintln(os.Stderr, "Failed to initialize logger: "+err.Error())
 		os.Exit(1)
 	}
+}
+
+func getFilterList() {
+	if filterDomainFile == "" {
+		filterList = filter.NewFilterList()
+		return
+	}
+
+	var (
+		absolutePath string
+		err          error
+	)
+	absolutePath, err = filepath.Abs(filterDomainFile)
+	if err != nil {
+		logger.Error("File path to the filter list returned an error.")
+	}
+	filterList = filter.NewFilterList()
+	filterList.LoadFromFile(absolutePath)
 }
 
 func startServer() {
@@ -54,7 +77,7 @@ func startServer() {
 	}()
 
 	if start {
-		var server *server.DNSServer = server.NewDNSServer(localAddr, upstreamDns)
+		var server *server.DNSServer = server.NewDNSServer(localAddr, upstreamDns, filterList)
 		if err = server.Start(ctx); err != nil {
 			logger.Error("Server gave an error: " + err.Error())
 			fmt.Fprintln(os.Stderr, "Server had an error while starting, is port 53 free?")
@@ -68,5 +91,6 @@ func startServer() {
 func main() {
 	flag.Parse()
 	verifications()
+	getFilterList()
 	startServer()
 }
