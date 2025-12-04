@@ -6,18 +6,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 )
 
 type FilterList struct {
-	mu      *sync.RWMutex
+	mu      sync.RWMutex
 	domains map[string]bool
 }
 
 func NewFilterList() *FilterList {
 	var defaultSize int = 8192 // 2^13 = 8192
-	return &FilterList{mu: &sync.RWMutex{}, domains: make(map[string]bool, defaultSize)}
+	return &FilterList{domains: make(map[string]bool, defaultSize)}
 }
 
 func (f *FilterList) Add(domain string) {
@@ -33,30 +34,22 @@ func (f *FilterList) IsBlocked(domain string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	var (
-		exists       bool
-		parts        []string
-		parentDomain string
+		found    bool
+		dotIndex int
 	)
+	domain = strings.ToLower(strings.TrimSpace(string.TrimSuffix(domain, ".")))
 
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	_, exists = f.domains[domain]
-	if exists {
-		return true
-	}
-
-	parts = strings.Split(domain, ".")
-	for i := 0; i < len(parts); i++ {
-		parentDomain = strings.Join(parts[i:], ".")
-		_, exists = f.domains[parentDomain]
-		if exists {
+	for {
+		if _, found = f.domains[domain]; found {
 			return true
 		}
-	}
 
-	for blocked := range f.domains {
-		if strings.Contains(domain, blocked) {
-			return true
+		dotIndex = strings.IndexRune(domain, '.')
+		if dotIndex == -1 {
+			break
 		}
+
+		domain = strings.Clone(domain[i:])
 	}
 
 	return false
@@ -69,7 +62,8 @@ func (f *FilterList) LoadFromFile(filename string) error {
 		scanner *bufio.Scanner
 		count   int
 		line    string
-		fields  []string
+		domain  []string
+		regex   *regexp.Regexp
 	)
 	if err = logger.Init(logger.DefaultPath); err != nil {
 		return err
@@ -82,20 +76,24 @@ func (f *FilterList) LoadFromFile(filename string) error {
 	defer file.Close()
 	scanner = bufio.NewScanner(file)
 
+	regex, err = regexp.Compile(`\|\|(.*)\^$`) // take string from ||<some string>^
+	if err != nil {
+		return err
+	}
+
 	for scanner.Scan() {
 		line = strings.TrimSpace(scanner.Text())
 
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") || strings.HasPreffix(line, "@@") {
 			continue
 		}
 
-		fields = strings.Fields(line)
-		if len(fields) >= 2 {
-			f.Add(fields[1])
-		} else if len(fields) == 1 {
-			f.Add(fields[0])
+		domain = regex.FindStringSubmatch(line)
+		if len(domain) == 0 { // if it is 0, no match was found :)
+			continue
 		}
 
+		f.Add(domain[1]) // the output is like [complete_line matched_group]
 		count++
 	}
 
@@ -105,8 +103,8 @@ func (f *FilterList) LoadFromFile(filename string) error {
 
 // returns the count of blocked domains
 func (f *FilterList) Count() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return len(f.domains)
 }
 
