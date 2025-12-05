@@ -197,6 +197,7 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 	response, err = s.resolver.Resolve(ctx, query)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to Resolve: %s - %v", domainName, err))
+		return
 	}
 
 	ttl = utils.ExtractTTL(response)
@@ -247,6 +248,7 @@ func (s *DNSServer) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			logger.Info("Server Stopping")
+			return nil
 		default:
 		}
 
@@ -271,7 +273,8 @@ func (s *DNSServer) Start(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			default:
-				return fmt.Errorf("Error reading: %w", err)
+				logger.Error(fmt.Sprintf("Error reading: %v", err))
+				continue
 			}
 		}
 		copy(query, buffer[:bytesRead])
