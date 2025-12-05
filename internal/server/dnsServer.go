@@ -75,7 +75,7 @@ func (s *Statistics) Log() {
 	blockRate = float(blocked) / float(total) * 100
 	CacheHitRate = float(cacheHits) / float(cacheHits+cacheMisses) * 100
 
-	logger.Info(fmt.Sprintf("Status --- Total: %d | Blocked: %d (%.1f%%) | Cache Hit Rate: %.1f%%", total, blocked, blockRate, CacheHitRate))
+	logger.Info(fmt.Sprintf("Status - Total: %d | Blocked: %d (%.1f%%) | Cache Hit Rate: %.1f%%", total, blocked, blockRate, CacheHitRate))
 }
 
 type UpstreamResolver struct {
@@ -126,6 +126,8 @@ type Config struct {
 	FilterMode  string // nxdomain or null, default to nxdomain
 }
 
+// server implementation
+// orchestrate all the interfaces from before
 type DNSServer struct {
 	config     Config
 	cache      Cache
@@ -134,16 +136,13 @@ type DNSServer struct {
 	statistics Statistics
 }
 
-func NewDNSServer(localAddr, upstreamDNS string, filterList *filter.FilterList) *DNSServer {
-	var (
-		config     Config      = Config{LocalAddr: localAddr + ":53", UpstreamDns: upstreamDNS, FilterMode: "nxdomain"}
-		statistics *Statistics = &Statistics{}
-	)
-
+func NewDNSServer(config Config, resolver Resolver, filterList *filter.FilterList) *DNSServer {
+	var statistics *Statistics = &Statistics{}
 	return &DNSServer{
 		cache:      cache.NewDNSCache(),
 		config:     config,
 		filter:     filterList,
+		resolver:   resolver,
 		statistics: statistics,
 	}
 }
@@ -155,39 +154,31 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 	default:
 	}
 
+	// filtering the query
 	var (
-		cacheKey string = utils.CreateCacheKey(query)
+		cacheKey   string = utils.CreateCacheKey(query)
+		domainName string = utils.ParseDomainName(query)
+		response   []byte = make([]byte, 512)
 	)
+	if s.filter != nil && s.filter.IsBlocked(domainName) {
+		s.statistics.incrementBlocked()
+		logger.Info(fmt.Sprintf("BLOCKED: %s", domainName))
 
-	if s.filterList != nil {
-		var domainName string = utils.ParseDomainName(query)
-		if s.filterList.IsBlocked(domainName) {
-			s.mu.Lock()
-			s.blockedCount++
-			s.mu.Unlock()
-
-			logger.Info(fmt.Sprintf("BLOCKED: %s", domainName))
-			var response []byte
-			if s.filterMode == "null" {
-				response = filter.CreateNullResponse(query)
-			} else {
-				response = filter.CreateBlockedResponse(query)
-			}
-
-			conn.WriteToUDP(response, clientAddr)
-			return
-
-		}
+		copy(response, s.createBlockedResponse(query))
+		conn.WriteToUDP(response, clientAddr)
+		return
 	}
+	s.statistics.incrementAllowed()
 
-	s.mu.Lock()
-	s.allowedCount++
-	s.mu.Unlock()
+	// response from cache immediately
+	var (
+		cachedResponse []byte = make([]byte, 512)
+		found          bool
+	)
+	if cachedResponse, found = s.cache.Get(cacheKey); found {
+		s.statistics.incrementCacheHits()
+		logger.Info(fmt.Sprintf("CACHE HIT: %s", domainName))
 
-	if cachedResponse, found := s.cache.Get(cacheKey); found {
-		logger.Info(fmt.Sprintf("Cache Hit: %s", cacheKey))
-
-		var response []byte = make([]byte, len(cachedResponse))
 		copy(response, cachedResponse)
 		copy(response[0:2], query[0:2])
 
@@ -195,17 +186,32 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 		return
 	}
 
-	logger.Warn(fmt.Sprintf("Cache miss: %s - Querying upstream dns", cacheKey))
+	s.statistics.incrementCacheMisses()
+	logger.Info(fmt.Sprintf("CACHE MISS: %s - querying Upstream", domainName))
+
+	// if miss, query upstream
 	var (
-		ttl      uint32
-		response []byte = make([]byte, 512)
+		err error
+		ttl uint32
 	)
-	response = s.dialUpstremDns(query)
+	response, err = s.resolver.Resolve(ctx, query)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to Resolve: %s - %v", domainName, err))
+	}
+
 	ttl = utils.ExtractTTL(response)
 	s.cache.Set(cacheKey, response, ttl)
-	logger.Info(fmt.Sprintf("Cached %s with TTL: %d seconds", cacheKey, ttl))
+	logger.Info(fmt.Sprintf("CACHED: %s (TTl: %ds)", domainName, ttl))
 
 	conn.WriteToUDP(response, clientAddr)
+}
+
+func (s *DNSServer) createBlockedResponse(query []byte) []byte {
+	if strings.EqualFold(s.config.FilterMode, "null") {
+		return filter.CreateNullResponse(query)
+	}
+
+	return filter.CreateBlockedResponse(query)
 }
 
 func (s *DNSServer) Start(ctx context.Context) error {
@@ -214,73 +220,64 @@ func (s *DNSServer) Start(ctx context.Context) error {
 		errorMsg string
 		addr     *net.UDPAddr
 		conn     *net.UDPConn
+		buffer   []byte = make([]byte, 512)
 	)
 	addr, err = net.ResolveUDPAddr("udp", s.localAddr)
 	if err != nil {
-		errorMsg = fmt.Sprintf("Failed to resolve address: %s", err.Error())
-		logger.Error(errorMsg)
-		return fmt.Errorf("%s", errorMsg)
+		return fmt.Errorf("Failed to resolve address: %w", err)
 	}
 
 	conn, err = net.ListenUDP("udp", addr)
 	if err != nil {
-		errorMsg = fmt.Sprintf("Failed to listen: %s", err.Error())
-		logger.Error(errorMsg)
-		return fmt.Errorf("%s", errorMsg)
+		return fmt.Errorf("Failed to listen: %s", err.Error())
 	}
 	defer conn.Close()
 
 	logger.Info(fmt.Sprintf("DNS server is Listening on: %s", s.localAddr))
 	logger.Info(fmt.Sprintf("DNS server upstream dns: %s", s.upstreamDNS))
 
+	if s.filter != nil {
+		logger.Info(fmt.Sprintf("Filter Loaded: %d domains", s.filter.Count()))
+	}
+
 	go s.cacheCleanUp(ctx)
+	go s.statsReporter(ctx)
+	go s.shutdownHandler(ctx, conn)
 
-	go func() {
-		<-ctx.Done()
-		logger.Info("Context cancelled, closing UDP connection")
-		conn.Close()
-	}()
-
-	var buffer []byte = make([]byte, 512)
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("Server Stopping")
 		default:
+		}
+
+		var (
+			bytesRead  int
+			clientAddr *net.UDPAddr
+			query      []byte = make([]byte, bytesRead)
+		)
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+
+		bytesRead, clientAddr, err = conn.ReadFromUDP(buffer)
+		if err != nil {
 			var (
-				n          int
-				clientAddr *net.UDPAddr
+				netErr net.Error
+				ok     bool
 			)
-			conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-
-			n, clientAddr, err = conn.ReadFromUDP(buffer)
-			if err != nil {
-				var (
-					netErr net.Error
-					ok     bool
-				)
-				if netErr, ok = err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-					errorMsg = fmt.Sprintf("Error reading: %s", err.Error())
-					logger.Error(errorMsg)
-					continue
-				}
+			if netErr, ok = err.(net.Error); ok && netErr.Timeout() {
+				continue
 			}
 
-			var query []byte = make([]byte, n)
-			copy(query, buffer[:n])
-
-			go s.handleQuery(ctx, query, clientAddr, conn)
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				return fmt.Errorf("Error reading: %w", err)
+			}
 		}
+		copy(query, buffer[:bytesRead])
+		go s.handleQuery(ctx, query, clientAddr, conn)
 	}
-
-	return nil
 }
 
 func (s *DNSServer) cacheCleanUp(ctx context.Context) {
@@ -298,4 +295,25 @@ func (s *DNSServer) cacheCleanUp(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (s *DNSServer) statsReporter(ctx) {
+	var ticker *time.Ticker = time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.statistics.Log()
+		case <-ctx.Done():
+			s.statistics.Log()
+			return
+		}
+	}
+}
+
+func (s *DNSServer) shutdownHandler(ctx, conn) {
+	<-ctx.Done()
+	logger.Info("Shutdown signal received, closing the server.")
+	conn.Close()
 }
