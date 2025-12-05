@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"flash-dns/internal/cache"
 	"flash-dns/internal/filter"
@@ -9,65 +10,142 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
-type DNSServer struct {
-	cache       *cache.DNSCache
-	upstreamDNS string
-	localAddr   string
-	filterList  *filter.FilterList
-	filterMode  string //nxdomain or null
-	//nx domain responds with name doesnt exist and null redirects to 0.0.0.0
+// Interfaces to be used in the server
+// they will divide work and make code more organized :)
+type Resolver interface {
+	Resolve(ctx context.Context, query []byte) ([]byte, error)
+}
 
-	//statistics
-	mu           sync.RWMutex
-	blockedCount uint64
-	allowedCount uint64
+type Filter interface {
+	IsBlocked(domain string) bool
+	Count() int
+}
+
+type Cache interface {
+	Get(key string) ([]byte, bool)
+	Set(key string, response []byte, ttl uint32)
+	Clean()
+}
+
+type Statistics struct {
+	blockedCount atomic.Uint64
+	allowedCount atomic.Uint64
+	cacheHits    atomic.Uint64
+	cacheMisses  atomic.Uint64
+}
+
+func (s *Statistics) incrementBlocked() {
+	_ = s.blockedCount.Add(1)
+}
+
+func (s *Statistics) incrementAllowed() {
+	_ = s.allowedCount.Add(1)
+}
+
+func (s *Statistics) incrementCacheHits() {
+	_ = s.cacheHits.Add(1)
+}
+
+func (s *Statistics) incrementCacheMisses() {
+	_ = s.cacheMisses.Add(1)
+}
+
+func (s *Statistics) GetStats() (blocked, allowed, cacheHits, cacheMisses uint64) {
+	return s.blockedCount.Load(), s.allowedCount.Load(), s.cacheHits.Load(), s.cacheMisses.Load()
+}
+
+func (s *Statistics) Log() {
+	var (
+		blocked      uint64
+		allowed      uint64
+		cacheHits    uint64
+		cacheMisses  uint64
+		total        uint64
+		blockRate    float
+		CacheHitRate float
+	)
+
+	blocked, allowed, cacheHits, cacheMisses = s.GetStats()
+	total = blocked + allowed
+
+	blockRate = float(blocked) / float(total) * 100
+	CacheHitRate = float(cacheHits) / float(cacheHits+cacheMisses) * 100
+
+	logger.Info(fmt.Sprintf("Status --- Total: %d | Blocked: %d (%.1f%%) | Cache Hit Rate: %.1f%%", total, blocked, blockRate, CacheHitRate))
+}
+
+type UpstreamResolver struct {
+	upstreamAddr string
+	timeout      time.Duration
+}
+
+func NewUpstreamResolver(upstreamAddr string) *UpstreamResolver {
+	return &UpstreamResolver{
+		upstreamAddr: upstreamAddr + ":53",
+		timeout:      5 * time.Second,
+	}
+}
+
+func (u *upstreamResolver) Resolve(ctx context.Context, query []byte) ([]byte, error) {
+	var (
+		conn      net.Conn
+		err       error
+		deadLine  time.Duration
+		response  []byte = make([]byte, 512)
+		bytesRead int
+	)
+	conn, err = net.Dial("udp", s.upstreamAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to upstream: %w", err)
+	}
+	defer conn.Close()
+
+	deadline = time.Now().Add(s.timeout)
+	conn.SetDeadline(deadline)
+
+	if _, err = conn.Write(query); err != nil {
+		return nil, fmt.Errorf("failed to write query: %w", err)
+	}
+
+	bytesRead, err = conn.Read(response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	response = bytes.Clone(response[:bytesRead])
+	return response, nil
+}
+
+type Config struct {
+	LocalAddr   string
+	UpstreamDns string
+	FilterMode  string // nxdomain or null, default to nxdomain
+}
+
+type DNSServer struct {
+	config     Config
+	cache      Cache
+	filter     Filter
+	resolver   Resolver
+	statistics Statistics
 }
 
 func NewDNSServer(localAddr, upstreamDNS string, filterList *filter.FilterList) *DNSServer {
-
-	var dnsPort string = ":53"
-	return &DNSServer{
-		cache:       cache.NewDNSCache(),
-		upstreamDNS: upstreamDNS + dnsPort,
-		localAddr:   localAddr + dnsPort,
-		filterList:  filterList,
-		filterMode:  "nxdomain", //default to nxdomain
-	}
-}
-
-func (s *DNSServer) dialUpstremDns(query []byte) []byte {
 	var (
-		upstreamConn net.Conn
-		n            int
-		err          error
-		response     []byte = make([]byte, 512)
+		config     Config      = Config{LocalAddr: localAddr + ":53", UpstreamDns: upstreamDNS, FilterMode: "nxdomain"}
+		statistics *Statistics = &Statistics{}
 	)
-	upstreamConn, err = net.Dial("udp", s.upstreamDNS)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error connecting to upstream: %s", s.upstreamDNS))
-		return response
-	}
-	defer upstreamConn.Close()
-	upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	_, err = upstreamConn.Write(query)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error writing to upstream: %s", err.Error()))
-		return response
+	return &DNSServer{
+		cache:      cache.NewDNSCache(),
+		config:     config,
+		filter:     filterList,
+		statistics: statistics,
 	}
-
-	n, err = upstreamConn.Read(response)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error reading from upstream: %s", err.Error()))
-		response = nil
-		return response
-	}
-	copy(response, response[:n])
-	return response
 }
 
 func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *net.UDPAddr, conn *net.UDPConn) {
