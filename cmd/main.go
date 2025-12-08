@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 )
 
 var (
@@ -71,7 +72,7 @@ func startServer() {
 		sigChan chan os.Signal = make(chan os.Signal, 1)
 	)
 
-	signal.Notify(sigChan, os.Interrupt, os.Kill)
+	signal.Notify(sigChan, os.Interrupt, os.Kill, syscall.SIGTERM)
 
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
