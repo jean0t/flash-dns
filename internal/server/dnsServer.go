@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"flash-dns/internal/cache"
 	"flash-dns/internal/filter"
@@ -10,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -31,93 +29,13 @@ type Cache interface {
 	Clean()
 }
 
-type Statistics struct {
-	blockedCount atomic.Uint64
-	allowedCount atomic.Uint64
-	cacheHits    atomic.Uint64
-	cacheMisses  atomic.Uint64
-}
-
-func (s *Statistics) incrementBlocked() {
-	_ = s.blockedCount.Add(1)
-}
-
-func (s *Statistics) incrementAllowed() {
-	_ = s.allowedCount.Add(1)
-}
-
-func (s *Statistics) incrementCacheHits() {
-	_ = s.cacheHits.Add(1)
-}
-
-func (s *Statistics) incrementCacheMisses() {
-	_ = s.cacheMisses.Add(1)
-}
-
-func (s *Statistics) GetStats() (blocked, allowed, cacheHits, cacheMisses uint64) {
-	return s.blockedCount.Load(), s.allowedCount.Load(), s.cacheHits.Load(), s.cacheMisses.Load()
-}
-
-func (s *Statistics) Log() {
-	var (
-		blocked      uint64
-		allowed      uint64
-		cacheHits    uint64
-		cacheMisses  uint64
-		total        uint64
-		blockRate    float64
-		CacheHitRate float64
-	)
-
-	blocked, allowed, cacheHits, cacheMisses = s.GetStats()
-	total = blocked + allowed
-
-	blockRate = float64(blocked) / float64(total) * 100
-	CacheHitRate = float64(cacheHits) / float64(cacheHits+cacheMisses) * 100
-
-	logger.Info(fmt.Sprintf("Status - Total: %d | Blocked: %d (%.1f%%) | Cache Hit Rate: %.1f%%", total, blocked, blockRate, CacheHitRate))
-}
-
-type UpstreamResolver struct {
-	upstreamAddr string
-	timeout      time.Duration
-}
-
-func NewUpstreamResolver(upstreamAddr string) *UpstreamResolver {
-	return &UpstreamResolver{
-		upstreamAddr: upstreamAddr,
-		timeout:      5 * time.Second,
-	}
-}
-
-func (u *UpstreamResolver) Resolve(ctx context.Context, query []byte) ([]byte, error) {
-	var (
-		conn      net.Conn
-		err       error
-		deadline  time.Time
-		response  []byte = make([]byte, 512)
-		bytesRead int
-	)
-	conn, err = net.Dial("udp", u.upstreamAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to upstream: %w", err)
-	}
-	defer conn.Close()
-
-	deadline = time.Now().Add(u.timeout)
-	conn.SetDeadline(deadline)
-
-	if _, err = conn.Write(query); err != nil {
-		return nil, fmt.Errorf("failed to write query: %w", err)
-	}
-
-	bytesRead, err = conn.Read(response)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	response = bytes.Clone(response[:bytesRead])
-	return response, nil
+type ServerStatistics interface {
+	incrementBlocked()
+	incrementAllowed()
+	incrementCacheHits()
+	incrementCacheMisses()
+	GetStats() (blocked, allowed, cacheHits, cacheMisses uint64)
+	Log()
 }
 
 type Config struct {
@@ -133,11 +51,11 @@ type DNSServer struct {
 	cache      Cache
 	filter     Filter
 	resolver   Resolver
-	statistics Statistics
+	statistics ServerStatistics
 }
 
 func NewDNSServer(config Config, resolver Resolver, filterList *filter.FilterList) *DNSServer {
-	var statistics Statistics = Statistics{}
+	var statistics *Statistics = &Statistics{}
 	return &DNSServer{
 		cache:      cache.NewDNSCache(),
 		config:     config,
@@ -159,6 +77,7 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 		queryInfo *utils.QueryInfo
 		err       error
 		response  []byte = make([]byte, 512)
+		blocked   bool
 	)
 	queryInfo, err = utils.ParseQuery(query)
 	if err != nil {
@@ -166,10 +85,7 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 		return
 	}
 
-	if s.filter != nil && s.filter.IsBlocked(queryInfo.Domain) {
-		s.statistics.incrementBlocked()
-		logger.Info(fmt.Sprintf("BLOCKED: %s", queryInfo.Domain))
-
+	if blocked = s.filterDomain(queryInfo.Domain); blocked {
 		copy(response, s.createBlockedResponse(query))
 		conn.WriteToUDP(response, clientAddr)
 		return
@@ -182,9 +98,6 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 		found          bool
 	)
 	if cachedResponse, found = s.cache.Get(queryInfo.CacheKey); found {
-		s.statistics.incrementCacheHits()
-		logger.Info(fmt.Sprintf("CACHE HIT: %s", queryInfo.Domain))
-
 		copy(response, cachedResponse)
 		copy(response[0:2], query[0:2])
 
@@ -210,6 +123,32 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 	logger.Info(fmt.Sprintf("CACHED: %s (TTl: %ds)", queryInfo.Domain, ttl))
 
 	conn.WriteToUDP(response, clientAddr)
+}
+
+func (s *DNSServer) filterDomain(domain string) bool {
+	if s.filter != nil && s.filter.IsBlocked(domain) {
+		s.statistics.incrementBlocked()
+		logger.Info(fmt.Sprintf("BLOCKED: %s", domain))
+		return true
+	}
+
+	return false
+}
+
+func (s *DNSServer) getCache(cacheKey string) ([]byte, bool) {
+	var (
+		cachedResponse []byte
+		found          bool
+	)
+	cachedResponse, found = s.cache.Get(cacheKey)
+	if found {
+		s.statistics.incrementCacheHits()
+		logger.Info(fmt.Sprintf("CACHE HIT: %s", queryInfo.Domain))
+
+		return cachedResponse, true
+	}
+
+	return nil, false
 }
 
 func (s *DNSServer) createBlockedResponse(query []byte) []byte {
