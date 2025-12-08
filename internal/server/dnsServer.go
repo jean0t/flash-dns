@@ -97,7 +97,7 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 		cachedResponse []byte = make([]byte, 512)
 		found          bool
 	)
-	if cachedResponse, found = s.cache.Get(queryInfo.CacheKey); found {
+	if cachedResponse, found = s.getCache(queryInfo.CacheKey, queryInfo.Domain); found {
 		copy(response, cachedResponse)
 		copy(response[0:2], query[0:2])
 
@@ -135,20 +135,20 @@ func (s *DNSServer) filterDomain(domain string) bool {
 	return false
 }
 
-func (s *DNSServer) getCache(cacheKey string) ([]byte, bool) {
+func (s *DNSServer) getCache(cacheKey, domain string) ([]byte, bool) {
 	var (
 		cachedResponse []byte
 		found          bool
 	)
 	cachedResponse, found = s.cache.Get(cacheKey)
-	if found {
-		s.statistics.incrementCacheHits()
-		logger.Info(fmt.Sprintf("CACHE HIT: %s", queryInfo.Domain))
-
-		return cachedResponse, true
+	if !found {
+		return nil, false
 	}
 
-	return nil, false
+	s.statistics.incrementCacheHits()
+	logger.Info(fmt.Sprintf("CACHE HIT: %s", domain))
+
+	return cachedResponse, true
 }
 
 func (s *DNSServer) createBlockedResponse(query []byte) []byte {
