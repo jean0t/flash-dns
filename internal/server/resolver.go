@@ -40,13 +40,13 @@ func (u *UpstreamResolver) Resolve(ctx context.Context, query []byte) ([]byte, e
 		responseChan chan []byte = make(chan []byte, len(u.upstreamAddrs))
 	)
 	queryCtx, cancel = context.WithCancel(ctx)
+	defer cancel()
 	for _, address := range u.upstreamAddrs {
 		go u.resolveUpstream(queryCtx, address, query, responseChan)
 	}
 
 	select {
 	case response = <-responseChan:
-		cancel()
 		return response, nil
 
 	case <-ctx.Done():
@@ -89,6 +89,7 @@ func (u *UpstreamResolver) resolveUpstream(ctx context.Context, address string, 
 
 	select {
 	case responseChan <- bytes.Clone(response[:bytesRead]):
+		// do nothing :)
 	case <-ctx.Done():
 		return
 	}
