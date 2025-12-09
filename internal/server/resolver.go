@@ -3,24 +3,62 @@ package server
 import (
 	"bytes"
 	"context"
+	"flash-dns/internal/logger"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
 type UpstreamResolver struct {
-	upstreamAddr string
-	timeout      time.Duration
+	upstreamAddrs []string
+	timeout       time.Duration
 }
 
-func NewUpstreamResolver(upstreamAddr string) *UpstreamResolver {
+func NewUpstreamResolver(upstream string) *UpstreamResolver {
+	var addresses []string = strings.Split(upstream, ",")
+	for i, v := range addresses {
+		addresses[i] = strings.TrimSpace(v) + ":53"
+	}
+
 	return &UpstreamResolver{
-		upstreamAddr: upstreamAddr,
-		timeout:      5 * time.Second,
+		upstreamAddrs: addresses,
+		timeout:       5 * time.Second,
 	}
 }
 
 func (u *UpstreamResolver) Resolve(ctx context.Context, query []byte) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	var (
+		queryCtx     context.Context
+		cancel       context.CancelFunc
+		response     []byte      = make([]byte, 512)
+		responseChan chan []byte = make(chan []byte, len(u.upstreamAddrs))
+	)
+	queryCtx, cancel = context.WithCancel(ctx)
+	for _, address := range u.upstreamAddrs {
+		go u.resolveUpstream(queryCtx, address, query, responseChan)
+	}
+
+	select {
+	case response = <-responseChan:
+		cancel()
+		return response, nil
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
+
+	case <-time.After(u.timeout):
+		return nil, fmt.Errorf("all upstream dns failed")
+	}
+
+}
+
+func (u *UpstreamResolver) resolveUpstream(ctx context.Context, address string, query []byte, responseChan chan []byte) {
 	var (
 		conn      net.Conn
 		err       error
@@ -28,9 +66,10 @@ func (u *UpstreamResolver) Resolve(ctx context.Context, query []byte) ([]byte, e
 		response  []byte = make([]byte, 512)
 		bytesRead int
 	)
-	conn, err = net.Dial("udp", u.upstreamAddr)
+	conn, err = net.Dial("udp", address)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to upstream: %w", err)
+		logger.Error(fmt.Sprintf("failed to connect to upstream %s: %w", address, err))
+		return
 	}
 	defer conn.Close()
 
@@ -38,14 +77,19 @@ func (u *UpstreamResolver) Resolve(ctx context.Context, query []byte) ([]byte, e
 	conn.SetDeadline(deadline)
 
 	if _, err = conn.Write(query); err != nil {
-		return nil, fmt.Errorf("failed to write query: %w", err)
+		logger.Error(fmt.Sprintf("failed to write query to %s: %w", address, err))
+		return
 	}
 
 	bytesRead, err = conn.Read(response)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		logger.Error(fmt.Sprintf("failed to read response from %s: %w", address, err))
+		return
 	}
 
-	response = bytes.Clone(response[:bytesRead])
-	return response, nil
+	select {
+	case responseChan <- bytes.Clone(response[:bytesRead]):
+	case <-ctx.Done():
+		return
+	}
 }
