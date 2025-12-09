@@ -162,7 +162,7 @@ func (c *DNSCache) evictOne() {
 	)
 	for k, v := range c.entries {
 		timeSinceAccess = v.TimeSinceLastAccess().Seconds()
-		popularity = v.popularity
+		popularity = float64(v.popularity.Load())
 		score = timeSinceAccess / (popularity + 1)
 
 		if score > worstScore {

@@ -25,7 +25,7 @@ var (
 func init() {
 	flag.BoolVar(&start, "s", false, "Start the Server")
 	flag.StringVar(&localAddr, "a", "0.0.0.0", "Address that the DNS server will listen")
-	flag.StringVar(&upstreamDns, "d", "1.1.1.1", "Upstream DNS to consult ips")
+	flag.StringVar(&upstreamDns, "d", "1.1.1.1,8.8.8.8", "Upstream DNS to consult ips")
 	flag.StringVar(&filterDomainFile, "f", "", "Path to file with domains to be filtered")
 }
 
@@ -87,7 +87,7 @@ func startServer() {
 
 		var (
 			dnsPort  string                   = ":53"
-			config   server.Config            = server.Config{LocalAddr: localAddr + dnsPort, UpstreamDns: upstreamDns + dnsPort, FilterMode: "nxdomain"}
+			config   server.Config            = server.Config{LocalAddr: localAddr + dnsPort, UpstreamDns: upstreamDns, FilterMode: "nxdomain"}
 			resolver *server.UpstreamResolver = server.NewUpstreamResolver(config.UpstreamDns)
 			server   *server.DNSServer        = server.NewDNSServer(config, resolver, filterList)
 		)

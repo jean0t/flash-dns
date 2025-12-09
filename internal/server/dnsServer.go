@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+const (
+	CLEANUP_TIME        time.Duration = 90 * time.Second // set the interval to clean expired cache
+	REPORT_STATUS_TIME  time.Duration = 5 * time.Minute  // interval to report status to the log
+	CLIENT_REQUEST_TIME time.Duration = 3 * time.Second  // how long we will read a client request
+)
+
 // Interfaces to be used in the server
 // they will divide work and make code more organized :)
 type Resolver interface {
@@ -24,7 +30,7 @@ type Filter interface {
 }
 
 type Cache interface {
-	Get(key string) ([]byte, bool)
+	Get(key string) ([]byte, bool, bool)
 	Set(key string, response []byte, ttl uint32)
 	Clean()
 }
@@ -96,10 +102,15 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 	var (
 		cachedResponse []byte = make([]byte, 512)
 		found          bool
+		needsRefresh   bool
 	)
-	if cachedResponse, found = s.getCache(queryInfo.CacheKey, queryInfo.Domain); found {
+	if cachedResponse, found, needsRefresh = s.getCache(queryInfo.CacheKey, queryInfo.Domain); found {
 		copy(response, cachedResponse)
 		copy(response[0:2], query[0:2])
+		if needsRefresh {
+			logger.Info(fmt.Sprintf("REFRESH CACHE: %s", queryInfo.Domain))
+			go s.refreshCache(ctx, query, queryInfo)
+		}
 
 		conn.WriteToUDP(response, clientAddr)
 		return
@@ -109,8 +120,52 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 	logger.Info(fmt.Sprintf("CACHE MISS: %s - querying Upstream", queryInfo.Domain))
 
 	// if miss, query upstream
+	response, err = s.queryUpstream(ctx, query, queryInfo)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to Resolve: %s - %v", queryInfo.Domain, err))
+		return
+	}
+
+	conn.WriteToUDP(response, clientAddr)
+}
+
+func (s *DNSServer) queryUpstream(ctx context.Context, query []byte, queryInfo *utils.QueryInfo) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil
+
+	default:
+	}
+
 	var (
-		ttl uint32
+		response []byte = make([]byte, 512)
+		err      error
+		ttl      uint32
+	)
+	response, err = s.resolver.Resolve(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	ttl = utils.ExtractTTL(response)
+
+	s.cache.Set(queryInfo.CacheKey, response, ttl)
+	logger.Info(fmt.Sprintf("CACHED: %s (TTl: %ds)", queryInfo.Domain, ttl))
+
+	return response, nil
+}
+
+func (s *DNSServer) refreshCache(ctx context.Context, query []byte, queryInfo *utils.QueryInfo) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	var (
+		response []byte = make([]byte, 512)
+		err      error
+		ttl      uint32
 	)
 	response, err = s.resolver.Resolve(ctx, query)
 	if err != nil {
@@ -120,9 +175,7 @@ func (s *DNSServer) handleQuery(ctx context.Context, query []byte, clientAddr *n
 
 	ttl = utils.ExtractTTL(response)
 	s.cache.Set(queryInfo.CacheKey, response, ttl)
-	logger.Info(fmt.Sprintf("CACHED: %s (TTl: %ds)", queryInfo.Domain, ttl))
-
-	conn.WriteToUDP(response, clientAddr)
+	logger.Info(fmt.Sprintf("REFRESHED: %s (TTL %ds)", ttl))
 }
 
 func (s *DNSServer) filterDomain(domain string) bool {
@@ -135,20 +188,21 @@ func (s *DNSServer) filterDomain(domain string) bool {
 	return false
 }
 
-func (s *DNSServer) getCache(cacheKey, domain string) ([]byte, bool) {
+func (s *DNSServer) getCache(cacheKey, domain string) ([]byte, bool, bool) {
 	var (
-		cachedResponse []byte
+		cachedResponse []byte = make([]byte, 512)
 		found          bool
+		needsRefresh   bool
 	)
-	cachedResponse, found = s.cache.Get(cacheKey)
+	cachedResponse, found, needsRefresh = s.cache.Get(cacheKey)
 	if !found {
-		return nil, false
+		return nil, found, needsRefresh
 	}
 
 	s.statistics.incrementCacheHits()
 	logger.Info(fmt.Sprintf("CACHE HIT: %s", domain))
 
-	return cachedResponse, true
+	return cachedResponse, found, needsRefresh
 }
 
 func (s *DNSServer) createBlockedResponse(query []byte) []byte {
@@ -201,7 +255,7 @@ func (s *DNSServer) Start(ctx context.Context) error {
 			clientAddr *net.UDPAddr
 			query      []byte = make([]byte, 512)
 		)
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(CLIENT_REQUEST_TIME))
 
 		bytesRead, clientAddr, err = conn.ReadFromUDP(buffer)
 		if err != nil {
@@ -227,7 +281,7 @@ func (s *DNSServer) Start(ctx context.Context) error {
 }
 
 func (s *DNSServer) cacheCleanUp(ctx context.Context) {
-	var ticker *time.Ticker = time.NewTicker(30 * time.Second)
+	var ticker *time.Ticker = time.NewTicker(CLEANUP_TIME)
 	defer ticker.Stop()
 
 	logger.Info("Cache Cleanup Started")
@@ -244,7 +298,7 @@ func (s *DNSServer) cacheCleanUp(ctx context.Context) {
 }
 
 func (s *DNSServer) statsReporter(ctx context.Context) {
-	var ticker *time.Ticker = time.NewTicker(5 * time.Minute)
+	var ticker *time.Ticker = time.NewTicker(REPORT_STATUS_TIME)
 	defer ticker.Stop()
 
 	for {
