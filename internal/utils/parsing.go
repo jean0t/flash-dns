@@ -79,72 +79,73 @@ func ParseQuery(query []byte) (*QueryInfo, error) {
 
 func ExtractTTL(response []byte) uint32 {
 	if len(response) < 12 {
-		return 300
+		return 300 // 5 minutes -> 60 * 5 = 300
 	}
 
 	var (
-		questions, answers uint16
-		position           int
+		position int    = 12
+		qdcount  uint16 = binary.BigEndian.Uint16(response[4:6])
+		ancount  uint16 = binary.BigEndian.Uint16(response[6:8])
+		minTTL   uint32 = uint32(3600) // default 1 hour
+		i        int
+		length   int
+		ttl      uint32
+		rdlength uint16
 	)
-	questions = binary.BigEndian.Uint16(response[4:6])
-	answers = binary.BigEndian.Uint16(response[6:8])
 
-	// start after header
-	position := 12
+	// Skip question section
+	for i = 0; i < int(qdcount); i++ {
+		// Skip domain name
+		for position < len(response) && response[position] != 0 {
+			if response[position] >= 192 { // compression pointer
+				position += 2
+				goto skipQuestionTypeClass // Jump past the zero-check
+			}
+			length = int(response[position])
+			position += length + 1
+		}
 
-	// skip questions
-	for q := 0; q < int(questions); q++ {
-		skipName(response, &position)
-		position += 4 // QTYPE + QCLASS
+		// Only check for zero if we didn't hit a compression pointer
+		if position < len(response) && response[position] == 0 {
+			position++
+		}
+
+	skipQuestionTypeClass:
+		position += 4 // skip QTYPE and QCLASS
 	}
 
-	minTTL := uint32(3600)
+	// Read answer section to find TTL
+	for i = 0; i < int(ancount) && position+10 < len(response); i++ {
+		// Skip name
+		for position < len(response) && response[position] != 0 {
+			if response[position] >= 192 { // compression pointer
+				position += 2
+				goto readAnswerTTL // Jump past the zero-check
+			}
 
-	// read answers
-	for a := 0; a < int(answers); a++ {
-		skipName(response, &position)
+			length = int(response[position])
+			position += length + 1
+		}
 
+		// Only check for zero if we didn't hit a compression pointer
+		if position < len(response) && response[position] == 0 {
+			position++
+		}
+
+	readAnswerTTL:
 		if position+10 > len(response) {
 			break
 		}
 
-		// TYPE, CLASS, TTL
-		ttl := binary.BigEndian.Uint32(response[position+4 : position+8])
+		ttl = binary.BigEndian.Uint32(response[position+4 : position+8])
 		if ttl < minTTL {
 			minTTL = ttl
 		}
 
-		rdlen := binary.BigEndian.Uint16(response[position+8 : position+10])
-		position += 10 + int(rdlen)
+		// skip type, class, ttl and rdlength
+		rdlength = binary.BigEndian.Uint16(response[position+8 : position+10])
+		position += 10 + int(rdlength)
 	}
 
 	return minTTL
-}
-
-func skipName(p []byte, position *int) {
-	var (
-		length int
-	)
-	for {
-		if *position >= len(p) {
-			return
-		}
-		b := p[*position]
-
-		// pointer
-		if b&0xC0 == 0xC0 {
-			*position += 2
-			return
-		}
-
-		// zero terminator
-		if b == 0 {
-			*position++
-			return
-		}
-
-		// label
-		length = int(b)
-		*position += 1 + length
-	}
 }
