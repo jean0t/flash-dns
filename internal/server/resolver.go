@@ -68,7 +68,7 @@ func (u *UpstreamResolver) resolveUpstream(ctx context.Context, address string, 
 	)
 	conn, err = net.Dial("udp", address)
 	if err != nil {
-		logger.Error(fmt.Sprintf("failed to connect to upstream %s: %w", address, err))
+		logger.Error(fmt.Sprintf("failed to connect to upstream %s: %v", address, err))
 		return
 	}
 	defer conn.Close()
@@ -77,13 +77,13 @@ func (u *UpstreamResolver) resolveUpstream(ctx context.Context, address string, 
 	conn.SetDeadline(deadline)
 
 	if _, err = conn.Write(query); err != nil {
-		logger.Error(fmt.Sprintf("failed to write query to %s: %w", address, err))
+		logger.Error(fmt.Sprintf("failed to write query to %s: %v", address, err))
 		return
 	}
 
 	bytesRead, err = conn.Read(response)
 	if err != nil {
-		logger.Error(fmt.Sprintf("failed to read response from %s: %w", address, err))
+		logger.Error(fmt.Sprintf("failed to read response from %s: %v", address, err))
 		return
 	}
 
